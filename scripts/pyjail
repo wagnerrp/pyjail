@@ -1,0 +1,36 @@
+#!/usr/local/bin/python
+
+# PROVIDE: jail
+# REQUIRE: LOGIN cleanvar
+# BEFORE: securelevel
+# KEYWORD: nojail shutdown
+
+import imp
+import sys
+import os
+from jail import Jail
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1:
+        command = sys.argv[1]
+        name = None
+        if len(sys.argv) > 2:
+            name = sys.argv[2]
+    else:
+        print 'Usage: /usr/local/etc/rc.d/jail (start|stop|restart)'
+        sys.exit(0)
+
+    modules = Jail.loadlist()
+    Jail.loadrunning()
+
+    if name:
+        if name not in modules:
+            print "jail '%s' not configured" % name
+            sys.exit(1)
+        modules[name].runcommand(command)
+    else:
+        print " Name                        Enabled   Running"
+        order = Jail.sortlist(command)
+        for module in order:
+            module.runcommand(command)
+
