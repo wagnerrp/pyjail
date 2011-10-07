@@ -11,23 +11,24 @@ import os
 from jail import Jail
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        command = sys.argv[1]
-        name = None
-        if len(sys.argv) > 2:
-            name = sys.argv[2]
-    else:
+    if len(sys.argv) == 1:
         print 'Usage: /usr/local/etc/rc.d/jail (start|stop|restart)'
         sys.exit(0)
+
+    if len(sys.argv) > 1:
+        command = sys.argv[1]
 
     modules = Jail.loadlist()
     Jail.loadrunning()
 
-    if name:
-        if name not in modules:
-            print "jail '%s' not configured" % name
-            sys.exit(1)
-        modules[name].runcommand(command)
+    if len(sys.argv) > 2:
+        for name in sys.argv[2:]:
+            if name not in modues:
+                print "jail '%s' not configured" % name
+                sys.exit(1)
+
+        for name in sys.argv[2:]:
+            modules[name].runcommand(command)
     else:
         print " Name                        Enabled   Running"
         order = Jail.sortlist(command)
