@@ -1,187 +1,11 @@
 #!/usr/local/bin/python
 
-import subprocess
 import imp
-import re
 import os
 import sys
 
-debug = 1
-null = open('/dev/null','w')
-
-def Popen(*args, **kwargs):
-    if debug:
-        print 'Popen: ',args,kwargs
-    if debug < 2:
-        for pipe in ['stdout','stderr']:
-            if pipe not in kwargs:
-                kwargs[pipe] = null
-    return subprocess.Popen(*args, **kwargs)
-
-def call(*args, **kwargs):
-    if debug:
-        print 'call: ',args,kwargs
-    if debug < 2:
-        for pipe in ['stdout','stderr']:
-            if pipe not in kwargs:
-                kwargs[pipe] = null
-    return subprocess.call(*args, **kwargs)
-
-    @classmethod
-    def apply(cls, mountpoint, ruleset):
-        call(['/sbin/devfs','-m',mountpoint,'ruleset',str(ruleset)])
-        call(['/sbin/devfs','-m',mountpoint,'rule','applyset'])
-
-    @classmethod
-    def mount(cls, mountpoint, ruleset):
-        try:
-            ruleset = int(ruleset)
-            if ruleset not in cls._names.values():
-                print 'Unknown devfs ruleset given, refusing to mount.'
-                return
-            mount('devfs', mountpoint, 'devfs')
-            cls.apply(mountpoint, ruleset)
-        except ValueError:
-            cls.mount(mountpoint, cls._names[ruleset])
-        
-def mount(node, loc, type=None, opts={}):
-    args = ['/sbin/mount']
-    if type:
-        args.append('-t')
-        args.append(type)
-    args.append(node)
-    args.append(loc)
-    if len(opts):
-        args.append('-o')
-        args.append(','.join(
-                ['%s=%s' % i for i in opts.items()]))
-    return call(args)
-
-class Devfs( list ):
-    _byid    = {}
-    _byname  = {}
-
-    _loaded  = []
-    _files   = []
-
-    @classmethod
-    def fromdevfs(cls, name, id):
-        id = int(id)
-        if id in cls._byid:
-            return cls._byid[id]
-
-        lines = []
-        devfs = Popen(['/sbin/devfs','rule','-s',str(id),'show'], stdout=-1)
-        devfs.wait()
-        for line in devfs.stdout:
-            lines.append(line.strip())
-        if len(lines):
-            return cls.fromlines(name, id, lines)
-        else:
-            return None
-
-    @classmethod
-    def fromlines(cls, name, id, lines):
-        id = int(id)
-        if id in cls._byid:
-            return cls._byid[id]
-
-        ruleset = cls(name, id)
-        for line in lines:
-            if 'include' in line:
-                s = line.split()
-                tag = s[s.index('include')+1][1:]
-                if tag in cls._byname:
-                    ruleset += cls._byname[tag]
-            else:
-                ruleset.append(" ".join([part.strip("'") for part in line.split()]))
-        ruleset.populated = True
-        return ruleset
-
-    def __repr__(self):
-        return self.name
-
-    def __init__(self, name, id):
-        super(Devfs, self).__init__([])
-        self.name = name
-        self.id = int(id)
-        self._lines = []
-        self.populated = False
-
-        self._byid[self.id] = self
-        self._byname[self.name] = self
-
-    def store(self, force=False):
-        if (self.id in self._loaded):
-            if not force:
-                return
-
-            call(['/sbin/devfs','rule','-s',str(self.id),'delset'])
-            self._loaded.remove(self.id)
-
-        for line in self:
-            call(['/sbin/devfs','rule','-s',str(self.id)]+line.split())
-        self._loaded.append(self.id)
-
-    def apply(self, mountpoint):
-        call(['/sbin/devfs','-m',mountpoint,'ruleset',str(self.id)])
-        call(['/sbin/devfs','-m',mountpoint,'rule','applyset'])
-
-    @classmethod
-    def loadrunning(cls):
-        cls._loaded = []
-        devfs = Popen(['/sbin/devfs','rule','showsets'],stdout=-1)
-        devfs.wait()
-
-        for line in devfs.stdout:
-            cls._loaded.append(int(line.strip()))
-
-    @classmethod
-    def _loadrules(cls, filename, force):
-        if (filename in cls._files) and not force:
-            return
-        cls._files.append(filename)
-        rulestart = re.compile('\[(?P<name>.*)=(?P<num>[0-9]+)\]')
-        cname = None
-        cnum = None
-        lines = []
-
-        for line in open(filename,'r'):
-            line = line.strip()
-            if len(line) == 0:
-                continue
-            if line.startswith('#'):
-                continue
-            match = rulestart.match(line)
-            if match:
-                if cname is not None:
-                    cls.fromlines(cname,cnum,lines).store(force)
-
-                cname, cnum = match.groups()
-                lines = []
-            else:
-                lines.append(line)
-
-        if cname is not None:
-            cls.fromlines(cname,cnum,lines).store(force)
-
-    @classmethod
-    def loadrules(cls, filename=None, force=False):
-        if len(cls._loaded) == 0:
-            cls.loadrunning()
-        if not filename:
-            cls._loadrules('/etc/defaults/devfs.rules', force)
-            cls._loadrules('/etc/devfs.rules', force)
-        else:
-            cls._loadrules(filename, force)
-
-    @classmethod
-    def mount(cls, mountpoint, ruleset):
-        mount('devfs', mountpoint, 'devfs')
-        if ruleset in cls._byid:
-            cls._byid[ruleset].apply(mountpoint)
-        elif ruleset in cls._byname:
-            cls._byname[ruleset].apply(mountpoint)
+from devfs import Devfs
+from util import Popen, call, mount
 
 class Jail( object ):
     enable      = True
@@ -201,8 +25,11 @@ class Jail( object ):
     devfs_rules = None
     procfs      = False
     mount       = False
+    ports       = False
     persist     = False
     hold_open   = '/bin/sh'
+    raw_socket  = False
+    alt_socket  = False
 
     running     = False
     jid         = None
@@ -318,26 +145,15 @@ class Jail( object ):
         self.rootdir = self.rootdir.rstrip('/')
 
     def runcommand(self, command):
-        if command == 'start':
-            self.start()
-        elif command == 'stop':
-            self.stop()
-        elif command == 'restart':
-            self.stop()
-            self.start()
-        elif command == 'poll':
-            self.poll()
-        elif command == 'applydevfs':
-            self.applydevfs()
-        elif command == 'list':
-            print "{0:<25}{1:<10}{2}".format(self.name, str(self.enable), self.running)
-        elif command == 'enable':
-            self.enabletask()
-        elif command == 'disable':
-            self.disabletask()
-        else:
+        if command not in ('forcestart', 'start', 'stop', 'restart', 'poll',
+                           'list', 'enable', 'disable', 'applydevfs'):
             print 'invalid command'
             sys.exit(1)
+
+        if command in ('enable', 'disable'):
+            getattr(self, command+'jail')()
+        else:
+            getattr(self, command)()
     
     def _mount(self):
         if self.devfs:
@@ -348,6 +164,10 @@ class Jail( object ):
 
         if self.procfs:
             mount('proc', self.rootdir+'/proc', 'procfs')
+
+        if self.ports:
+            mount('/usr/ports', self.rootdir+'/usr/ports', 'nullfs')
+            mount('/usr/ports/distfiles', self.rootdir+'/usr/ports/distfiles', 'nullfs')
 
         if self.mount:
             # check if exists
@@ -361,12 +181,33 @@ class Jail( object ):
             call(['/sbin/umount',self.rootdir+'/dev'])
         if self.procfs:
             call(['/sbin/umount',self.rootdir+'/proc'])
+        if self.ports:
+            call(['/sbin/umount',self.rootdir+'/usr/ports/distfiles'])
+            call(['/sbin/umount',self.rootdir+'/usr/ports'])
 
     def _ifprestart(self):
         if self.vlan:
-            ifc = Popen(['/sbin/ifconfig','epair','create'], stdout=-1)
+            # search for existing usable vlan
+            ifc = Popen(['/sbin/ifconfig'], stdout=-1)
             ifc.wait()
-            self._ifpair = ifc.stdout.readline().rstrip()[:-1]
+            pairs = {}
+            for line in ifc.stdout:
+                if not line.startswith('epair'):
+                    continue
+                pair = line.split(':')[0][:-1]
+                if pair in pairs:
+                    pairs[pair] += 1
+                else:
+                    pairs[pair] = 1
+            for k,v in sorted(pairs.items()):
+                if v == 2:
+                    self._ifpair = k
+                    break
+            else:
+                # create a new vlan
+                ifc = Popen(['/sbin/ifconfig','epair','create'], stdout=-1)
+                ifc.wait()
+                self._ifpair = ifc.stdout.readline().rstrip()[:-1]
 
             call(['/sbin/ifconfig','bridge0','addm',self._ifpair+'a'])
             call(['/sbin/ifconfig',self._ifpair+'a','up'])
@@ -414,7 +255,7 @@ class Jail( object ):
         if self.vlan:
             paira = self._ifpair+'a'
             call(['/sbin/ifconfig','bridge0','deletem',paira])
-            call(['/sbin/ifconfig',paira,'destroy'])
+#            call(['/sbin/ifconfig',paira,'destroy'])
 
         else:
             for ip in self.ip4:
@@ -438,13 +279,27 @@ class Jail( object ):
             if len(self.ip6):
                 cmd.append('ip6.addr='+','.join(self.ip6))
             cmd += ('command='+self.exec_start).split()
+        if self.raw_socket:
+            cmd.append("allow.raw_sockets")
+        if self.alt_socket:
+            cmd.append("allow.socket_af")
         return cmd
 
-    def start(self):
+    def list(self):
+        print "{0:<25}{1:<10}{2}".format(self.name, str(self.enable), self.running)
+
+    def forcestart(self):
+        self.start(True)
+
+    def restart(self):
+        self.stop()
+        self.start()
+
+    def start(self, force=False):
         if self.running:
             print self.name+' is already running'
             return False
-        if not self.enable:
+        if not (self.enable or force):
             return False
         print 'starting '+self.name
         self._mount()
@@ -472,8 +327,8 @@ class Jail( object ):
         if not self.running:
             print self.name+' is not running'
             return False
-        if not self.enable:
-            return False
+#        if not self.enable:
+#            return False
         print 'stopping '+self.name
         self._ifprestop()
         call(['/usr/sbin/jexec',self.jid]+self.exec_stop.split())
@@ -483,7 +338,7 @@ class Jail( object ):
         self.running = False
         return True
 
-    def enabletask(self):
+    def enablejail(self):
         f = open(self.file, 'r')
         buff = ''
         for line in f:
@@ -497,7 +352,7 @@ class Jail( object ):
         f.write(buff)
         f.close()
 
-    def disabletask(self):
+    def disablejail(self):
         f = open(self.file, 'r')
         buff = ''
         for line in f:
@@ -525,4 +380,4 @@ class Jail( object ):
         Devfs.loadrules()
         if self.devfs_rules:
             Devfs.loadrules(self.devfs_rules)
-        Devfs.apply(self.rootdir+'/dev', self.devfs)
+        Devfs.fromStore(self.devfs).apply(self.rootdir+'/dev')
